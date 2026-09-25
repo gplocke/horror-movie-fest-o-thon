@@ -231,6 +231,14 @@ input:focus-visible, select:focus-visible, .btn:focus-visible, .star-half:focus-
 .participant .mini { height: 8px; background: #0e0716; border-radius: 999px; margin-top: 8px; overflow: hidden; }
 .participant .mini i { display: block; height: 100%; background: var(--orange); border-radius: 999px; transition: width .5s ease; }
 .participant.done .mini i { background: var(--green); }
+.participant.everyone { margin-bottom: 8px; border-color: var(--line); background: linear-gradient(135deg, var(--card-2), rgba(138, 63, 252, .18)); }
+.participant.everyone .avatar { background: var(--orange); color: #1a0800; }
+.participant.everyone.active { border-color: var(--orange); }
+.movie .who { display: flex; align-items: center; justify-content: center; }
+.movie .who .avatar { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; background: var(--purple); color: #fff; font-size: .8rem; }
+.movie .by { color: var(--green); font-weight: 800; }
+.day-sep { list-style: none; font-family: "Creepster", cursive; font-size: 1.2rem; color: var(--muted); letter-spacing: .04em; margin: 8px 0 -2px; padding-left: 4px; }
+.day-sep:first-child { margin-top: 0; }
 .participant .you { font-size: .7rem; color: var(--green); font-weight: 800; text-transform: uppercase; margin-left: 6px; }
 
 /* ---------- misc ---------- */

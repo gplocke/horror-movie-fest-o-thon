@@ -169,7 +169,11 @@
   function myEntries() { return state.entries.filter(function (e) { return e.email === state.user.email; }); }
   function entriesFor(email) { return state.entries.filter(function (e) { return e.email === email; }); }
 
+  var EVERYONE = '*';
+  function viewingEveryone() { return state.viewing === EVERYONE; }
+
   function renderProgress() {
+    if (viewingEveryone()) return renderGroupProgress();
     var viewingMe = !state.viewing || state.viewing === state.user.email;
     var email = viewingMe ? state.user.email : state.viewing;
     var who = viewingMe ? 'Your' : (displayName(email) + "'s");
@@ -193,6 +197,33 @@
 
     $('progressCountdown').textContent = countdownText();
     $('progressMsg').textContent = progressMessage(count, goal, viewingMe);
+  }
+
+  function renderGroupProgress() {
+    var count = state.entries.length;
+    var n = state.participants.length || 1;
+    var goal = state.goal * n;
+    var finished = state.participants.filter(function (p) { return p.count >= state.goal; }).length;
+    var pct = Math.min(100, Math.round(count / goal * 100));
+
+    $('progressTitle').textContent = "The coven's progress";
+    $('progressCount').textContent = count;
+    $('progressGoal').textContent = goal;
+    $('progressFill').style.width = pct + '%';
+    $('progressBar').setAttribute('aria-valuenow', count);
+    $('progressBar').setAttribute('aria-valuemax', goal);
+    $('progressBar').classList.toggle('done', finished === n && n > 0);
+    var ticks = $('progressTicks');
+    if (ticks.childElementCount !== n) {
+      ticks.innerHTML = '';
+      for (var i = 0; i < n; i++) ticks.appendChild(document.createElement('i'));
+    }
+    $('progressCountdown').textContent = countdownText();
+    var avg = n ? (count / n).toFixed(1) : '0';
+    $('progressMsg').textContent =
+      count === 0 ? 'Nobody has pressed play yet.' :
+      finished === n ? '🏆 Everyone survived. ' + count + ' movies between you.' :
+      finished + ' of ' + n + ' finished · ' + avg + ' movies each on average.';
   }
 
   function countdownText() {
@@ -221,27 +252,41 @@
   // ------------------------------------------------------------ list
 
   function renderList() {
-    var viewingMe = !state.viewing || state.viewing === state.user.email;
+    var everyone = viewingEveryone();
+    var viewingMe = !everyone && (!state.viewing || state.viewing === state.user.email);
     var email = viewingMe ? state.user.email : state.viewing;
-    var list = entriesFor(email);
-    $('listTitle').textContent = viewingMe ? 'Your watchlist' : displayName(email) + "'s watchlist";
+    var list = everyone ? state.entries : entriesFor(email);
+    $('listTitle').textContent = everyone ? 'Everyone\'s activity' : viewingMe ? 'Your watchlist' : displayName(email) + "'s watchlist";
     $('backToMine').hidden = viewingMe;
     $('formCard').hidden = !viewingMe;
     $('listEmpty').hidden = list.length > 0;
 
     var ol = $('movieList');
     ol.innerHTML = '';
+    var lastDay = null;
     // Show newest first but number from oldest → #1 is the first movie of the month.
     list.forEach(function (e, idx) {
+      if (everyone && e.date !== lastDay) {
+        lastDay = e.date;
+        var sep = document.createElement('li');
+        sep.className = 'day-sep';
+        sep.textContent = prettyDate(e.date);
+        ol.appendChild(sep);
+      }
       var n = list.length - idx;
       var li = document.createElement('li');
       li.className = 'movie';
       li.innerHTML =
-        '<div class="n">' + n + '</div>' +
+        (everyone
+          ? '<div class="who" title="' + esc(displayName(e.email)) + '"><span class="avatar">' + esc(initials(displayName(e.email))) + '</span></div>'
+          : '<div class="n">' + n + '</div>') +
         (e.poster ? '<img alt="" loading="lazy" src="' + POSTER + esc(e.poster) + '">' : '<div class="no-poster">🎬</div>') +
         '<div class="info">' +
           '<div class="title">' + esc(e.title) + (e.year ? ' <span class="y">(' + esc(e.year) + ')</span>' : '') + '</div>' +
-          '<div class="meta"><span>' + esc(prettyDate(e.date)) + '</span>' + (e.where ? '<span>·</span><span>' + esc(e.where) + '</span>' : '') + '</div>' +
+          '<div class="meta">' +
+            (everyone ? '<span class="by">' + esc(displayName(e.email)) + (e.email === state.user.email ? ' (you)' : '') + '</span><span>·</span>' : '') +
+            '<span>' + esc(prettyDate(e.date)) + '</span>' + (e.where ? '<span>·</span><span>' + esc(e.where) + '</span>' : '') +
+          '</div>' +
           '<div class="stars-ro" title="' + e.rating + ' / 5">' + starsRO(e.rating) + '</div>' +
         '</div>' +
         (viewingMe ? '<div class="actions">' +
@@ -273,6 +318,10 @@
     var ul = $('participantList');
     ul.innerHTML = '';
     var goal = state.goal;
+    var ev = $('everyoneBtn');
+    ev.classList.toggle('active', viewingEveryone());
+    ev.setAttribute('aria-pressed', viewingEveryone());
+    $('everyoneCount').textContent = state.entries.length;
     state.participants.forEach(function (p) {
       var li = document.createElement('li');
       var btn = document.createElement('button');
@@ -304,7 +353,7 @@
   function renderWhereList() {
     var dl = $('whereList');
     var seen = {};
-    var opts = ['Theater', 'Netflix', 'Shudder', 'Tubi', 'Max', 'Hulu', 'Prime Video', 'Peacock', 'Paramount+', 'Blu-ray', 'DVD', 'Kanopy', 'Disney', 'Other'];
+    var opts = ['Theater', 'Netflix', 'Shudder', 'Tubi', 'Max', 'Hulu', 'Prime Video', 'Peacock', 'Paramount+', 'Blu-ray', 'DVD', 'Kanopy'];
     state.entries.forEach(function (e) { if (e.where) opts.unshift(e.where); });
     dl.innerHTML = '';
     opts.forEach(function (w) {
@@ -616,6 +665,12 @@
     $('signOutBtn').addEventListener('click', function () { signOut(false); });
     $('notInvitedSignOut').addEventListener('click', function () { signOut(true); });
     $('backToMine').addEventListener('click', function () { state.viewing = null; renderAll(); });
+    $('everyoneBtn').addEventListener('click', function () {
+      state.viewing = viewingEveryone() ? null : EVERYONE;
+      cancelEdit();
+      renderAll();
+      if (window.innerWidth < 860) $('listTitle').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
     $('movieForm').addEventListener('submit', onSubmit);
     $('cancelEditBtn').addEventListener('click', cancelEdit);
     $('pickedClear').addEventListener('click', function () { clearPick(); $('fTitle').focus(); });
