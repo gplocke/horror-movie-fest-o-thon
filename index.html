@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Horror Movie Fest-o-thon</title>
+  <meta name="description" content="31 new-to-you horror movies. 31 days. One October.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎃</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Creepster&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="config.js"></script>
+</head>
+<body>
+  <div class="fog" aria-hidden="true"></div>
+  <div class="bats" aria-hidden="true">
+    <span>🦇</span><span>🦇</span><span>🦇</span>
+  </div>
+
+  <header class="topbar">
+    <a class="brand" href="#">
+      <span class="brand-pumpkin" aria-hidden="true">🎃</span>
+      <span class="brand-text">Horror Movie<br><em>Fest-o-thon</em></span>
+    </a>
+    <div class="topbar-right" id="topbarRight" hidden>
+      <label class="year-picker">
+        <span class="sr-only">Year</span>
+        <select id="yearSelect" aria-label="Year"></select>
+      </label>
+      <div class="user-chip" id="userChip">
+        <img id="userAvatar" alt="" width="32" height="32">
+        <span id="userName"></span>
+        <button class="btn btn-ghost btn-sm" id="signOutBtn" type="button">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== Signed out ===== -->
+  <main class="hero" id="viewSignedOut">
+    <h1 class="hero-title">31 movies.<br>31 nights.<br>One October.</h1>
+    <p class="hero-sub">
+      Watch at least <strong id="heroGoal">31</strong> horror movies you've never seen before,
+      log them here, and see how the rest of the coven is doing.
+    </p>
+    <div class="signin-box">
+      <div id="googleSignIn"></div>
+      <p class="muted small" id="signInNote">Sign in with Google to log your watches.</p>
+    </div>
+    <div class="hero-ghost" aria-hidden="true">👻</div>
+  </main>
+
+  <!-- ===== Not invited ===== -->
+  <main class="hero" id="viewNotInvited" hidden>
+    <h1 class="hero-title">You shall<br>not pass.</h1>
+    <p class="hero-sub">
+      <span id="notInvitedEmail"></span> isn't on the guest list yet.
+      Ask the host to add your email to the <strong>Participants</strong> tab.
+    </p>
+    <button class="btn" id="notInvitedSignOut" type="button">Try a different account</button>
+  </main>
+
+  <!-- ===== App ===== -->
+  <main class="app" id="viewApp" hidden>
+    <section class="col-main">
+
+      <!-- Progress -->
+      <div class="card progress-card">
+        <div class="progress-head">
+          <div>
+            <h2 class="card-title" id="progressTitle">Your progress</h2>
+            <p class="muted" id="progressCountdown"></p>
+          </div>
+          <div class="progress-big">
+            <span id="progressCount">0</span><span class="progress-of">/ <span id="progressGoal">31</span></span>
+          </div>
+        </div>
+        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="31" aria-valuenow="0" id="progressBar">
+          <div class="bar-fill" id="progressFill"></div>
+          <div class="bar-ticks" id="progressTicks" aria-hidden="true"></div>
+        </div>
+        <p class="progress-msg" id="progressMsg"></p>
+      </div>
+
+      <!-- Add / edit form -->
+      <div class="card" id="formCard">
+        <h2 class="card-title" id="formTitle">Log a movie</h2>
+        <form id="movieForm" autocomplete="off" novalidate>
+          <input type="hidden" id="fId">
+          <input type="hidden" id="fTmdbId">
+          <input type="hidden" id="fPoster">
+          <input type="hidden" id="fYear">
+
+          <div class="field search-field">
+            <label for="fTitle">Movie</label>
+            <div class="search-wrap">
+              <input id="fTitle" type="text" placeholder="Start typing a title…" required>
+              <div class="search-results" id="searchResults" hidden></div>
+            </div>
+            <div class="picked" id="pickedMovie" hidden>
+              <img id="pickedPoster" alt="" width="40" height="60">
+              <span id="pickedLabel"></span>
+              <button type="button" class="btn-x" id="pickedClear" aria-label="Clear selection">×</button>
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="fDate">Watched on</label>
+              <input id="fDate" type="date" required>
+            </div>
+            <div class="field">
+              <label for="fWhere">Where</label>
+              <input id="fWhere" type="text" list="whereList" placeholder="Shudder, theater, Tubi…">
+              <datalist id="whereList"></datalist>
+            </div>
+          </div>
+
+          <div class="field">
+            <span class="label" id="ratingLabel">Rating</span>
+            <div class="stars" id="starInput" role="radiogroup" aria-labelledby="ratingLabel"></div>
+            <input type="hidden" id="fRating" value="">
+            <span class="rating-text" id="ratingText">Pick a rating</span>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary" id="submitBtn">Add to my list</button>
+            <button type="button" class="btn btn-ghost" id="cancelEditBtn" hidden>Cancel</button>
+            <span class="form-error" id="formError" role="alert"></span>
+          </div>
+        </form>
+      </div>
+
+      <!-- List -->
+      <div class="card">
+        <div class="list-head">
+          <h2 class="card-title" id="listTitle">Your watchlist</h2>
+          <button type="button" class="btn btn-ghost btn-sm" id="backToMine" hidden>← Back to my list</button>
+        </div>
+        <p class="muted" id="listEmpty" hidden>Nothing logged yet. The night is young.</p>
+        <ol class="movie-list" id="movieList"></ol>
+      </div>
+    </section>
+
+    <aside class="col-side">
+      <div class="card">
+        <h2 class="card-title">The coven <span class="muted small" id="yearLabel"></span></h2>
+        <ul class="participants" id="participantList"></ul>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="footer">
+    <span>Movie data from <a href="https://www.themoviedb.org/" target="_blank" rel="noopener">TMDB</a>.</span>
+    <span id="statusText" class="muted"></span>
+  </footer>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="app.js"></script>
+</body>
+</html>
