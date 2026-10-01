@@ -101,6 +101,7 @@ python3 -m http.server 8000
 
 - **Auth:** the site gets a Google ID token from Google Identity Services and sends it with every request. Apps Script verifies it against Google's `tokeninfo` endpoint, checks the `aud` matches your client ID, and checks the email is on the `Participants` tab. Tokens are cached server-side for up to 30 minutes.
 - **Data:** each year tab has columns `id | email | date | title | year | tmdbId | poster | where | rating | createdAt | updatedAt`. Users can only edit/delete rows where `email` is theirs.
+- **Comments:** a single `Comments` tab (all years) with `id | year | entryId | email | text | createdAt`. Anyone on the allowlist can comment on any entry; you can only delete your own comments. Deleting a movie deletes its thread.
 - **Privacy:** anyone on the allowlist can see everyone's lists for the year (that's the point). Nobody off the allowlist can read anything.
 - **Rating:** 0.5–5 in half-star steps, Letterboxd style.
 - **Year picker:** lists every `YYYY` tab in the sheet plus the current year; defaults to the current year.

@@ -17,7 +17,9 @@
     goal: CONFIG.GOAL || 31,
     entries: [],         // every entry for the year (all participants)
     participants: [],    // [{ email, name, count }]
-    viewing: null,       // email whose list is shown (null = me)
+    comments: [],        // every comment for the year [{ id, entryId, email, text, createdAt }]
+    openThreads: {},     // entryId -> true while a thread is expanded
+    viewing: null,       // email whose list is shown (null = me, '*' = everyone)
     editingId: null,
     search: { timer: null, seq: 0, results: [], active: -1 },
     rating: 0,
@@ -140,14 +142,15 @@
     sel.value = state.year;
   }
 
-  function loadYear(year) {
+  function loadYear(year, keepView) {
+    if (String(year) !== state.year) keepView = false;
     state.year = String(year);
-    state.viewing = null;
-    cancelEdit();
+    if (!keepView) { state.viewing = null; state.openThreads = {}; cancelEdit(); }
     setStatus('Summoning ' + year + '…');
     return api('list', { year: state.year }).then(function (data) {
       state.entries = data.entries || [];
       state.participants = data.participants || [];
+      state.comments = data.comments || [];
       state.goal = data.goal || state.goal;
       if (data.years) state.years = data.years;
       renderYears();
@@ -289,13 +292,103 @@
           '</div>' +
           '<div class="stars-ro" title="' + e.rating + ' / 5">' + starsRO(e.rating) + '</div>' +
         '</div>' +
-        (viewingMe ? '<div class="actions">' +
-          '<button type="button" class="btn btn-ghost btn-sm" data-edit="' + esc(e.id) + '">Edit</button>' +
-          '<button type="button" class="btn btn-ghost btn-sm btn-danger" data-del="' + esc(e.id) + '">Delete</button>' +
-        '</div>' : '');
+        '<div class="actions">' +
+          commentButton(e) +
+          (viewingMe ? '<button type="button" class="btn btn-ghost btn-sm" data-edit="' + esc(e.id) + '">Edit</button>' +
+          '<button type="button" class="btn btn-ghost btn-sm btn-danger" data-del="' + esc(e.id) + '">Delete</button>' : '') +
+        '</div>';
+      if (state.openThreads[e.id]) li.appendChild(renderThread(e));
       ol.appendChild(li);
     });
   }
+
+  // ------------------------------------------------------------ comments
+
+  function commentsFor(entryId) {
+    return state.comments.filter(function (c) { return c.entryId === entryId; });
+  }
+
+  function commentButton(e) {
+    var n = commentsFor(e.id).length;
+    var open = !!state.openThreads[e.id];
+    return '<button type="button" class="btn btn-ghost btn-sm btn-comments' + (n ? ' has' : '') + (open ? ' open' : '') + '" data-thread="' + esc(e.id) + '" aria-expanded="' + open + '">' +
+      '💬 ' + (n || '') + '</button>';
+  }
+
+  function renderThread(e) {
+    var wrap = document.createElement('div');
+    wrap.className = 'thread';
+    var list = commentsFor(e.id);
+    var html = '';
+    if (!list.length) html += '<p class="muted small thread-empty">No comments yet. Be the first to scream.</p>';
+    list.forEach(function (c) {
+      var mine = c.email === state.user.email;
+      var name = displayName(c.email);
+      html +=
+        '<div class="comment">' +
+          '<span class="avatar" title="' + esc(name) + '">' + esc(initials(name)) + '</span>' +
+          '<div class="comment-body">' +
+            '<div class="comment-head"><span class="comment-name">' + esc(name) + (mine ? ' <span class="you">you</span>' : '') + '</span>' +
+            '<span class="muted small">' + esc(prettyWhen(c.createdAt)) + '</span>' +
+            (mine ? '<button type="button" class="btn-x btn-x-sm" data-delcomment="' + esc(c.id) + '" aria-label="Delete comment">×</button>' : '') +
+            '</div>' +
+            '<div class="comment-text">' + esc(c.text).replace(/\n/g, '<br>') + '</div>' +
+          '</div>' +
+        '</div>';
+    });
+    html +=
+      '<form class="comment-form" data-entry="' + esc(e.id) + '">' +
+        '<textarea rows="1" maxlength="1000" placeholder="Add a comment…" aria-label="Add a comment" required></textarea>' +
+        '<button type="submit" class="btn btn-primary btn-sm">Post</button>' +
+      '</form>';
+    wrap.innerHTML = html;
+    return wrap;
+  }
+
+  function toggleThread(entryId) {
+    if (state.openThreads[entryId]) delete state.openThreads[entryId];
+    else state.openThreads[entryId] = true;
+    renderList();
+    if (state.openThreads[entryId]) {
+      var ta = document.querySelector('.comment-form[data-entry="' + cssEsc(entryId) + '"] textarea');
+      if (ta) ta.focus();
+    }
+  }
+
+  function onCommentSubmit(form) {
+    var ta = form.querySelector('textarea');
+    var text = ta.value.trim();
+    if (!text) return;
+    var entryId = form.dataset.entry;
+    var btn = form.querySelector('button');
+    btn.disabled = true; ta.disabled = true;
+    api('comment', { year: state.year, entryId: entryId, text: text }).then(function () {
+      state.openThreads[entryId] = true;
+      return loadYear(state.year, true);
+    }).catch(function (err) {
+      toast(err.message, true);
+      btn.disabled = false; ta.disabled = false;
+    });
+  }
+
+  function onDeleteComment(id) {
+    if (!confirm('Delete this comment?')) return;
+    api('deleteComment', { id: id }).then(function () {
+      return loadYear(state.year, true);
+    }).catch(function (err) { toast(err.message, true); });
+  }
+
+  function prettyWhen(iso) {
+    var d = new Date(iso);
+    if (isNaN(d)) return '';
+    var diff = (Date.now() - d) / 1000;
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function cssEsc(s) { return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'); }
 
   function starsRO(r) {
     var out = '';
@@ -616,6 +709,11 @@
     for (var j = 0; j < 31; j++) add('ash@example.com', 'Ash Movie ' + (j + 1), j);
     for (var k = 0; k < 14; k++) add('laurie@example.com', 'Laurie Movie ' + (k + 1), k);
     mock.entries[y] = rows;
+    mock.comments = [
+      { id: 'c1', year: y, entryId: 'you@example.com5', email: 'ash@example.com', text: 'Groovy pick. The ending wrecked me.', createdAt: new Date(Date.now() - 7200e3).toISOString() },
+      { id: 'c2', year: y, entryId: 'you@example.com5', email: 'you@example.com', text: 'Right?? I did not see that coming.', createdAt: new Date(Date.now() - 3600e3).toISOString() },
+      { id: 'c3', year: y, entryId: 'ash@example.com30', email: 'laurie@example.com', text: 'Only 4 stars? Bold.', createdAt: new Date(Date.now() - 600e3).toISOString() }
+    ];
   })();
 
   function mockApi(action, p) {
@@ -632,7 +730,16 @@
             var parts = mock.participants.map(function (q) { return { email: q.email, name: q.name, count: counts[q.email] || 0 }; })
               .sort(function (a, b) { return b.count - a.count; });
             var sorted = rows.slice().sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : (a.createdAt < b.createdAt ? 1 : -1); });
-            return resolve({ ok: true, year: y, goal: mock.goal, years: years, participants: parts, entries: sorted });
+            var cs = (mock.comments || []).filter(function (c) { return c.year === y; });
+            return resolve({ ok: true, year: y, goal: mock.goal, years: years, participants: parts, entries: sorted, comments: cs });
+          }
+          case 'comment': {
+            mock.comments.push({ id: 'c' + Date.now(), year: y, entryId: p.entryId, email: mock.user.email, text: p.text, createdAt: new Date().toISOString() });
+            return resolve({ ok: true });
+          }
+          case 'deleteComment': {
+            mock.comments = mock.comments.filter(function (c) { return c.id !== p.id; });
+            return resolve({ ok: true });
           }
           case 'search': {
             var q = String(p.query || '').toLowerCase();
@@ -649,6 +756,7 @@
           }
           case 'delete': {
             mock.entries[y] = rows.filter(function (r) { return r.id !== p.id; });
+            mock.comments = mock.comments.filter(function (c) { return c.entryId !== p.id; });
             return resolve({ ok: true });
           }
           default: return resolve({ ok: false, error: 'unknown' });
@@ -683,6 +791,23 @@
       if (!t) return;
       if (t.dataset.edit) startEdit(t.dataset.edit);
       if (t.dataset.del) onDelete(t.dataset.del);
+      if (t.dataset.thread) toggleThread(t.dataset.thread);
+      if (t.dataset.delcomment) onDeleteComment(t.dataset.delcomment);
+    });
+    $('movieList').addEventListener('submit', function (ev) {
+      var f = ev.target.closest('.comment-form');
+      if (!f) return;
+      ev.preventDefault();
+      onCommentSubmit(f);
+    });
+    $('movieList').addEventListener('keydown', function (ev) {
+      if (ev.target.tagName === 'TEXTAREA' && ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+        ev.preventDefault();
+        onCommentSubmit(ev.target.closest('.comment-form'));
+      }
+    });
+    $('movieList').addEventListener('input', function (ev) {
+      if (ev.target.tagName === 'TEXTAREA') { ev.target.style.height = 'auto'; ev.target.style.height = Math.min(160, ev.target.scrollHeight) + 'px'; }
     });
     initAuth();
   });

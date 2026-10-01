@@ -14,10 +14,15 @@
  *   "Participants" tab:  email | name
  *   One tab per year, e.g. "2026":
  *     id | email | date | title | year | tmdbId | poster | where | rating | createdAt | updatedAt
+ *   "Comments" tab (all years):
+ *     id | year | entryId | email | text | createdAt
  */
 
 var HEADERS = ['id', 'email', 'date', 'title', 'year', 'tmdbId', 'poster', 'where', 'rating', 'createdAt', 'updatedAt'];
 var PARTICIPANTS_SHEET = 'Participants';
+var COMMENTS_SHEET = 'Comments';
+var COMMENT_HEADERS = ['id', 'year', 'entryId', 'email', 'text', 'createdAt'];
+var COMMENT_MAX = 1000;
 
 // ---------------------------------------------------------------- entry points
 
@@ -51,6 +56,8 @@ function doPost(e) {
       case 'add':    return json_(add_(user, req.year, req.entry));
       case 'update': return json_(update_(user, req.year, req.id, req.entry));
       case 'delete': return json_(remove_(user, req.year, req.id));
+      case 'comment':       return json_(addComment_(user, req.year, req.entryId, req.text));
+      case 'deleteComment': return json_(removeComment_(user, req.id));
       default:       return json_({ ok: false, error: 'unknown action: ' + action });
     }
   } catch (err) {
@@ -131,7 +138,72 @@ function list_(year) {
   });
   participants.sort(function (a, b) { return b.count - a.count || a.name.localeCompare(b.name); });
 
-  return { ok: true, year: year, goal: goal_(), years: years_(), participants: participants, entries: entries };
+  return { ok: true, year: year, goal: goal_(), years: years_(), participants: participants, entries: entries, comments: comments_(year) };
+}
+
+// ---------------------------------------------------------------- comments
+
+function comments_(year) {
+  var sheet = ss_().getSheetByName(COMMENTS_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  var rows = sheet.getDataRange().getValues();
+  var out = [];
+  for (var i = 1; i < rows.length; i++) {
+    var r = rows[i];
+    if (!r[0] || String(r[1]) !== String(year)) continue;
+    out.push({ id: String(r[0]), entryId: String(r[2]), email: String(r[3]).toLowerCase(), text: String(r[4] || ''), createdAt: String(r[5] || '') });
+  }
+  out.sort(function (a, b) { return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0; });
+  return out;
+}
+
+function addComment_(user, year, entryId, text) {
+  year = normYear_(year);
+  text = String(text || '').trim();
+  if (!text) return { ok: false, error: 'Say something.' };
+  if (text.length > COMMENT_MAX) return { ok: false, error: 'Keep it under ' + COMMENT_MAX + ' characters.' };
+  var entrySheet = yearSheet_(year, false);
+  if (!entrySheet || findRow_(entrySheet, entryId) < 0) return { ok: false, error: 'That entry no longer exists.' };
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheet = commentsSheet_();
+    var id = Utilities.getUuid();
+    sheet.appendRow([id, year, String(entryId), user.email, text, new Date().toISOString()]);
+    return { ok: true, id: id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function removeComment_(user, id) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheet = ss_().getSheetByName(COMMENTS_SHEET);
+    if (!sheet) return { ok: false, error: 'not_found' };
+    var rowIndex = findRow_(sheet, id);
+    if (rowIndex < 0) return { ok: false, error: 'not_found' };
+    var owner = String(sheet.getRange(rowIndex, 4).getValue()).toLowerCase();
+    if (owner !== user.email) return { ok: false, error: 'forbidden', code: 403 };
+    sheet.deleteRow(rowIndex);
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function commentsSheet_() {
+  var ss = ss_();
+  var sheet = ss.getSheetByName(COMMENTS_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(COMMENTS_SHEET);
+    sheet.appendRow(COMMENT_HEADERS);
+    sheet.setFrozenRows(1);
+    sheet.getRange('B:C').setNumberFormat('@');
+  }
+  return sheet;
 }
 
 function add_(user, year, entry) {
@@ -188,9 +260,20 @@ function remove_(user, year, id) {
     var owner = String(sheet.getRange(rowIndex, 2).getValue()).toLowerCase();
     if (owner !== user.email) return { ok: false, error: 'forbidden', code: 403 };
     sheet.deleteRow(rowIndex);
+    deleteCommentsFor_(id);
     return { ok: true };
   } finally {
     lock.releaseLock();
+  }
+}
+
+/** Removes every comment attached to an entry (called when the entry is deleted). */
+function deleteCommentsFor_(entryId) {
+  var sheet = ss_().getSheetByName(COMMENTS_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) return;
+  var ids = sheet.getRange(2, 3, sheet.getLastRow() - 1, 1).getValues();
+  for (var i = ids.length - 1; i >= 0; i--) {
+    if (String(ids[i][0]) === String(entryId)) sheet.deleteRow(i + 2);
   }
 }
 
@@ -341,4 +424,5 @@ function setup() {
     p.setFrozenRows(1);
   }
   yearSheet_(String(new Date().getFullYear()), true);
+  commentsSheet_();
 }
