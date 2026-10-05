@@ -13,13 +13,25 @@
  * Sheet layout:
  *   "Participants" tab:  email | name
  *   One tab per year, e.g. "2026":
- *     id | email | date | title | year | tmdbId | poster | where | rating | createdAt | updatedAt
+ *     id | email | date | title | year | tmdbId | poster | where | rating | createdAt | updatedAt | imdbId
  *   "Comments" tab (all years):
  *     id | year | entryId | email | text | createdAt
+ *   "Sessions" tab (server-issued login sessions):
+ *     token | email | expiry
+ *
+ * Auth: the browser sends a Google ID token exactly once (action "login").
+ * We verify it, mint a random session token, store it on the Sessions tab and
+ * hand it back. Every other request carries that session token instead.
+ * Sessions last 30 days and are extended each time they're used.
  */
 
-var HEADERS = ['id', 'email', 'date', 'title', 'year', 'tmdbId', 'poster', 'where', 'rating', 'createdAt', 'updatedAt'];
+var HEADERS = ['id', 'email', 'date', 'title', 'year', 'tmdbId', 'poster', 'where', 'rating', 'createdAt', 'updatedAt', 'imdbId'];
+var IMDB_COL = HEADERS.indexOf('imdbId') + 1; // 1-based column index (12)
 var PARTICIPANTS_SHEET = 'Participants';
+var SESSIONS_SHEET = 'Sessions';
+var SESSION_HEADERS = ['token', 'email', 'expiry'];
+var SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;      // 30 days
+var SESSION_EXTEND_SLOP_MS = 60 * 60 * 1000;        // only rewrite expiry once it's drifted > 1h
 var COMMENTS_SHEET = 'Comments';
 var COMMENT_HEADERS = ['id', 'year', 'entryId', 'email', 'text', 'createdAt'];
 var COMMENT_MAX = 1000;
@@ -41,9 +53,12 @@ function doPost(e) {
   try {
     var action = req.action || '';
     if (action === 'ping') return json_({ ok: true });
+    if (action === 'login') return json_(login_(req.idToken));
 
-    var user = verifyUser_(req.idToken);
+    var user = sessionUser_(req.token);
     if (!user) return json_({ ok: false, error: 'unauthorized', code: 401 });
+    // Logging out must work even if you've since been dropped from the guest list.
+    if (action === 'logout') return json_(logout_(req.token));
 
     var allowed = participantInfo_(user.email);
     if (!allowed) return json_({ ok: false, error: 'not_invited', code: 403, email: user.email });
@@ -94,6 +109,131 @@ function verifyUser_(idToken) {
   cache.put(key, JSON.stringify(user), ttl);
   return user;
 }
+
+// ---------------------------------------------------------------- sessions
+
+/**
+ * action "login": swaps a Google ID token for a long-lived session token.
+ * Only people on the Participants tab get a session.
+ */
+function login_(idToken) {
+  var google = verifyUser_(idToken);
+  if (!google) return { ok: false, error: 'unauthorized', code: 401 };
+  var allowed = participantInfo_(google.email);
+  if (!allowed) return { ok: false, error: 'not_invited', code: 403, email: google.email };
+
+  var user = { email: google.email, name: allowed.name || google.name || google.email, picture: google.picture || '' };
+  var token = createSession_(user.email);
+  return { ok: true, token: token, user: user, years: years_(), goal: goal_() };
+}
+
+/** action "logout": deletes the session row so the token stops working everywhere. */
+function logout_(token) {
+  CacheService.getScriptCache().remove(sessionCacheKey_(token));
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheet = ss_().getSheetByName(SESSIONS_SHEET);
+    var row = sheet ? findRow_(sheet, token) : -1;
+    if (row > 0) sheet.deleteRow(row);
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function createSession_(email) {
+  var token = Utilities.getUuid();
+  var expiry = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheet = sessionsSheet_();
+    pruneSessions_(sheet);
+    sheet.appendRow([token, email, expiry]);
+  } finally {
+    lock.releaseLock();
+  }
+  CacheService.getScriptCache().put(sessionCacheKey_(token), JSON.stringify({ email: email, expiry: expiry }), 600);
+  return token;
+}
+
+/**
+ * Looks up a session token. Returns { email, name, picture } or null.
+ * Sliding expiry: every use pushes the expiry back out to a full 30 days
+ * (written to the sheet at most about once an hour per session).
+ */
+function sessionUser_(token) {
+  token = String(token || '').trim();
+  if (!/^[0-9a-f-]{36}$/i.test(token)) return null;
+
+  var cache = CacheService.getScriptCache();
+  var key = sessionCacheKey_(token);
+  var now = Date.now();
+  var sess = null;
+  var cached = cache.get(key);
+  if (cached) sess = JSON.parse(cached);
+
+  if (!sess) {
+    var sheet = ss_().getSheetByName(SESSIONS_SHEET);
+    if (!sheet || sheet.getLastRow() < 2) return null;
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SESSION_HEADERS.length).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]) === token) {
+        sess = { email: String(rows[i][1]).toLowerCase(), expiry: toIso_(rows[i][2]) };
+        break;
+      }
+    }
+    if (!sess) return null;
+  }
+
+  var exp = Date.parse(sess.expiry);
+  if (!(exp > now)) { cache.remove(key); return null; }
+
+  if (exp < now + SESSION_TTL_MS - SESSION_EXTEND_SLOP_MS) {
+    sess.expiry = new Date(now + SESSION_TTL_MS).toISOString();
+    var sh = ss_().getSheetByName(SESSIONS_SHEET);
+    var row = sh ? findRow_(sh, token) : -1;
+    if (row > 0) sh.getRange(row, 3).setValue(sess.expiry);
+  }
+  cache.put(key, JSON.stringify(sess), 600);
+  return { email: sess.email, name: '', picture: '' };
+}
+
+function sessionCacheKey_(token) {
+  return 'sess_' + String(token || '');
+}
+
+/** Drops expired rows. Called under the script lock. */
+function pruneSessions_(sheet) {
+  var last = sheet.getLastRow();
+  if (last < 2) return;
+  var expiries = sheet.getRange(2, 3, last - 1, 1).getValues();
+  var now = Date.now();
+  for (var i = expiries.length - 1; i >= 0; i--) {
+    var exp = Date.parse(toIso_(expiries[i][0]));
+    if (!(exp > now)) sheet.deleteRow(i + 2);
+  }
+}
+
+function sessionsSheet_() {
+  var ss = ss_();
+  var sheet = ss.getSheetByName(SESSIONS_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(SESSIONS_SHEET);
+    sheet.appendRow(SESSION_HEADERS);
+    sheet.setFrozenRows(1);
+    sheet.getRange('A:C').setNumberFormat('@');
+  }
+  return sheet;
+}
+
+function toIso_(v) {
+  if (v instanceof Date) return v.toISOString();
+  return String(v || '');
+}
+
+// ---------------------------------------------------------------- participants
 
 /** Returns { email, name } if the email is on the Participants tab, else null. */
 function participantInfo_(email) {
@@ -211,13 +351,17 @@ function add_(user, year, entry) {
   var clean = cleanEntry_(entry);
   if (clean.error) return { ok: false, error: clean.error };
 
+  // Resolve the IMDb id before taking the lock so a slow TMDB call doesn't block other writers.
+  var imdbId = imdbIdFor_(clean.tmdbId);
+
   var lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
     var sheet = yearSheet_(year, true);
+    ensureImdbColumn_(sheet);
     var now = new Date().toISOString();
     var id = Utilities.getUuid();
-    sheet.appendRow([id, user.email, clean.date, clean.title, clean.year, clean.tmdbId, clean.poster, clean.where, clean.rating, now, now]);
+    sheet.appendRow([id, user.email, clean.date, clean.title, clean.year, clean.tmdbId, clean.poster, clean.where, clean.rating, now, now, imdbId]);
     return { ok: true, id: id };
   } finally {
     lock.releaseLock();
@@ -236,11 +380,19 @@ function update_(user, year, id, entry) {
     if (!sheet) return { ok: false, error: 'No sheet for ' + year };
     var rowIndex = findRow_(sheet, id);
     if (rowIndex < 0) return { ok: false, error: 'not_found' };
-    var owner = String(sheet.getRange(rowIndex, 2).getValue()).toLowerCase();
+    ensureImdbColumn_(sheet);
+    var current = sheet.getRange(rowIndex, 1, 1, HEADERS.length).getValues()[0];
+    var owner = String(current[1]).toLowerCase();
     if (owner !== user.email) return { ok: false, error: 'forbidden', code: 403 };
-    var createdAt = sheet.getRange(rowIndex, 10).getValue();
+    var createdAt = current[9];
+
+    // Keep the stored IMDb id unless the movie changed (or it was never resolved).
+    var imdbId = String(current[IMDB_COL - 1] || '');
+    if (!clean.tmdbId) imdbId = '';
+    else if (!imdbId || Number(current[5]) !== clean.tmdbId) imdbId = imdbIdFor_(clean.tmdbId);
+
     sheet.getRange(rowIndex, 1, 1, HEADERS.length).setValues([[
-      id, user.email, clean.date, clean.title, clean.year, clean.tmdbId, clean.poster, clean.where, clean.rating, createdAt, new Date().toISOString()
+      id, user.email, clean.date, clean.title, clean.year, clean.tmdbId, clean.poster, clean.where, clean.rating, createdAt, new Date().toISOString(), imdbId
     ]]);
     return { ok: true };
   } finally {
@@ -307,6 +459,67 @@ function search_(query) {
   return { ok: true, results: results };
 }
 
+// ---------------------------------------------------------------- IMDb
+
+/** Resolves a TMDB movie id to its IMDb id ("tt0084787"), or '' if unknown. Never throws. */
+function imdbIdFor_(tmdbId) {
+  tmdbId = Number(tmdbId);
+  if (!tmdbId) return '';
+  var key = props_().TMDB_API_KEY;
+  if (!key) return '';
+
+  var cache = CacheService.getScriptCache();
+  var ck = 'imdb_' + tmdbId;
+  var hit = cache.get(ck);
+  if (hit !== null) return hit === '-' ? '' : hit;
+
+  try {
+    var url = 'https://api.themoviedb.org/3/movie/' + tmdbId + '?api_key=' + encodeURIComponent(key);
+    var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) return '';
+    var data = JSON.parse(res.getContentText());
+    var imdb = /^tt\d+$/.test(String(data.imdb_id || '')) ? String(data.imdb_id) : '';
+    cache.put(ck, imdb || '-', 21600);
+    return imdb;
+  } catch (err) {
+    return '';
+  }
+}
+
+/** Makes sure the year tab has the imdbId header (tabs created before this column existed won't). */
+function ensureImdbColumn_(sheet) {
+  if (sheet.getMaxColumns() < IMDB_COL) sheet.insertColumnsAfter(sheet.getMaxColumns(), IMDB_COL - sheet.getMaxColumns());
+  var cell = sheet.getRange(1, IMDB_COL);
+  if (String(cell.getValue()).trim() !== 'imdbId') cell.setValue('imdbId');
+}
+
+/**
+ * Run once from the editor after upgrading: looks up the IMDb id for every
+ * existing row that has a tmdbId but no imdbId yet, across all year tabs.
+ */
+function backfillImdbIds() {
+  var ss = ss_();
+  var total = 0;
+  years_().forEach(function (year) {
+    var sheet = ss.getSheetByName(year);
+    ensureImdbColumn_(sheet);
+    var last = sheet.getLastRow();
+    if (last < 2) return;
+    var rows = sheet.getRange(2, 1, last - 1, IMDB_COL).getValues();
+    var col = rows.map(function (r) { return [r[IMDB_COL - 1]]; });
+    var changed = 0;
+    rows.forEach(function (r, i) {
+      if (!r[0] || !r[5] || r[IMDB_COL - 1]) return;
+      var imdb = imdbIdFor_(r[5]);
+      if (imdb) { col[i][0] = imdb; changed++; }
+    });
+    if (changed) sheet.getRange(2, IMDB_COL, col.length, 1).setValues(col);
+    Logger.log(year + ': added ' + changed + ' IMDb id(s) across ' + rows.length + ' row(s)');
+    total += changed;
+  });
+  Logger.log('Done. ' + total + ' IMDb id(s) added.');
+}
+
 // ---------------------------------------------------------------- helpers
 
 function cleanEntry_(entry) {
@@ -347,7 +560,8 @@ function readEntries_(sheet) {
       where: String(r[7] || ''),
       rating: Number(r[8]),
       createdAt: String(r[9] || ''),
-      updatedAt: String(r[10] || '')
+      updatedAt: String(r[10] || ''),
+      imdbId: String(r[11] || '')
     });
   }
   out.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : (a.createdAt < b.createdAt ? 1 : -1); });
@@ -423,6 +637,7 @@ function setup() {
     p.appendRow([Session.getEffectiveUser().getEmail(), '']);
     p.setFrozenRows(1);
   }
-  yearSheet_(String(new Date().getFullYear()), true);
+  ensureImdbColumn_(yearSheet_(String(new Date().getFullYear()), true));
   commentsSheet_();
+  sessionsSheet_();
 }

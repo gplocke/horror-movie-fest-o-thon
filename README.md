@@ -12,12 +12,12 @@ Watch at least 31 new-to-you horror movies in October. Log them. Haunt your frie
 | Movie search | **TMDB**, proxied through Apps Script so the key never ships to browsers | $0 |
 
 ```
-browser ──(Google ID token + JSON)──▶ Apps Script /exec ──▶ Google Sheet
-                                          │
-                                          └──▶ TMDB search API
+browser ──(session token + JSON)──▶ Apps Script /exec ──▶ Google Sheet
+                                        │
+                                        └──▶ TMDB search + movie details (IMDb id)
 ```
 
-The sheet has a `Participants` tab (the allowlist) and one tab per year (`2026`, `2027`, …), created automatically the first time someone logs a movie that year.
+The sheet has a `Participants` tab (the allowlist), a `Comments` tab, a `Sessions` tab (login sessions), and one tab per year (`2026`, `2027`, …), created automatically the first time someone logs a movie that year.
 
 ---
 
@@ -27,7 +27,7 @@ The sheet has a `Participants` tab (the allowlist) and one tab per year (`2026`,
 
 1. Create a Google Sheet (or open the one you already have).
 2. **Extensions → Apps Script.** Delete the sample code, paste in `apps-script/Code.gs`, save.
-3. In the editor, pick the `setup` function from the dropdown and hit **Run**. Approve the permissions. This creates the `Participants` tab (with your email on it) and this year's tab.
+3. In the editor, pick the `setup` function from the dropdown and hit **Run**. Approve the permissions. This creates the `Participants` tab (with your email on it), this year's tab, and the `Comments` and `Sessions` tabs.
 4. Add friends' Google emails to the `Participants` tab, column A. Column B is an optional display name — leave it blank to use their Google name.
 
 > The script runs as *you*, so the sheet doesn't technically need to be link-shared for the site to work. Sharing it "anyone with the link can edit" is fine if you want participants to poke at the raw data.
@@ -63,6 +63,14 @@ Back in the Apps Script editor:
 
 Whenever you change `Code.gs` later: **Deploy → Manage deployments → ✏️ → Version: New version → Deploy.** The URL stays the same.
 
+### Upgrading an existing sheet
+
+If your sheet predates the `imdbId` column or the `Sessions` tab:
+
+1. Paste the new `Code.gs`, then run `setup` again — it adds the `Sessions` tab and the `imdbId` header on this year's tab (older year tabs get the header the next time anyone edits them, or when you run the backfill).
+2. Run `backfillImdbIds` once from the editor. It looks up the IMDb id for every existing row that has a `tmdbId` and fills the `imdbId` column. Watch **Executions** / the log for a per-year count.
+3. Deploy a new version. Everyone will need to sign in once more — old Google-token sessions no longer work.
+
 ### 5. Configure the site
 
 Edit `config.js`:
@@ -94,13 +102,15 @@ Make sure that origin (`https://YOUR-GITHUB-USERNAME.github.io`) is in the OAuth
 python3 -m http.server 8000
 ```
 
-- <http://localhost:8000/?mock=1> — fake data, no sign-in, no backend. Good for tweaking the look.
+- <http://localhost:8000/?mock=1> — fake data, no sign-in, no backend. Good for tweaking the look. (Mock mode keeps its own `festothon.mock.*` keys in `localStorage`, so it never collides with a real session.)
 - <http://localhost:8000/> — real sign-in and real sheet (needs `http://localhost:8000` in the OAuth origins).
 
 ## How it works
 
-- **Auth:** the site gets a Google ID token from Google Identity Services and sends it with every request. Apps Script verifies it against Google's `tokeninfo` endpoint, checks the `aud` matches your client ID, and checks the email is on the `Participants` tab. Tokens are cached server-side for up to 30 minutes.
-- **Data:** each year tab has columns `id | email | date | title | year | tmdbId | poster | where | rating | createdAt | updatedAt`. Users can only edit/delete rows where `email` is theirs.
+- **Auth:** the site gets a Google ID token from Google Identity Services and sends it **once** (`action: "login"`). Apps Script verifies it against Google's `tokeninfo` endpoint, checks the `aud` matches your client ID, checks the email is on the `Participants` tab, then mints a random UUID session token and stores `token | email | expiry` on the `Sessions` tab. The browser keeps that token in `localStorage` and sends it with every request. Sessions last 30 days and are extended each time they're used (Google ID tokens alone expire after an hour, which is why they aren't used directly). A `401` from the server wipes local storage and shows the sign-in button again; **Sign out** deletes the session row. Expired rows are pruned on each login.
+- **Data:** each year tab has columns `id | email | date | title | year | tmdbId | poster | where | rating | createdAt | updatedAt | imdbId`. Users can only edit/delete rows where `email` is theirs.
+- **IMDb links:** when a movie is added (or its TMDB pick changes), Apps Script calls TMDB's `/movie/{id}` endpoint and stores the `imdb_id`. The site renders the title as a link to `https://www.imdb.com/title/{imdbId}/` when one is present. Run `backfillImdbIds` to fill in older rows.
+- **Loading & cache:** the last successful list for each year is cached in `localStorage` and rendered immediately on load, then replaced when fresh data arrives. With no cache, a skeleton (placeholder bars and rows) shows until the first response.
 - **Comments:** a single `Comments` tab (all years) with `id | year | entryId | email | text | createdAt`. Anyone on the allowlist can comment on any entry; you can only delete your own comments. Deleting a movie deletes its thread.
 - **Privacy:** anyone on the allowlist can see everyone's lists for the year (that's the point). Nobody off the allowlist can read anything.
 - **Rating:** 0.5–5 in half-star steps, Letterboxd style.
