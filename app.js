@@ -5,21 +5,16 @@
   var CONFIG = window.FEST_CONFIG || {};
   var MOCK = !!CONFIG.MOCK || /[?&]mock=1/.test(location.search);
   var POSTER = 'https://image.tmdb.org/t/p/w185';
-  // Everything we persist lives under this prefix so it can be wiped in one go.
-  var STORAGE_NS = MOCK ? 'festothon.mock.' : 'festothon.';
-  var SESSION_KEY = STORAGE_NS + 'session';   // { token, user, years, goal }
-  var CACHE_PREFIX = STORAGE_NS + 'list.';    // + year -> last successful list response
+  var TOKEN_KEY = 'festothon.idToken';
 
   var $ = function (id) { return document.getElementById(id); };
 
   var state = {
-    token: null,         // server-issued session token (sent with every request)
+    idToken: null,
     user: null,          // { email, name, picture }
     year: String(new Date().getFullYear()),
     years: [],
     goal: CONFIG.GOAL || 31,
-    loadedYear: null,    // year whose list (cached or fresh) is currently rendered
-    loadSeq: 0,          // guards against out-of-order list responses
     entries: [],         // every entry for the year (all participants)
     participants: [],    // [{ email, name, count }]
     comments: [],        // every comment for the year [{ id, entryId, email, text, createdAt }]
@@ -35,7 +30,7 @@
 
   function api(action, payload) {
     if (MOCK) return mockApi(action, payload || {});
-    var body = Object.assign({ action: action, token: state.token }, payload || {});
+    var body = Object.assign({ action: action, idToken: state.idToken }, payload || {});
     return fetch(CONFIG.APPS_SCRIPT_URL, {
       method: 'POST',
       // text/plain avoids a CORS preflight, which Apps Script can't answer.
@@ -44,11 +39,7 @@
       redirect: 'follow'
     }).then(function (r) { return r.json(); }).then(function (data) {
       if (!data.ok) {
-        if (data.code === 401) {
-          if (action === 'login') throw new Error('Google didn\'t accept that sign-in. Try again?');
-          sessionExpired();
-          throw new Error('Your session expired — please sign in again.');
-        }
+        if (data.code === 401) { signOut(true); throw new Error('Your session expired — please sign in again.'); }
         if (data.error === 'not_invited') { showNotInvited(data.email); throw new Error('not_invited'); }
         throw new Error(data.error || 'Something went wrong');
       }
@@ -56,65 +47,50 @@
     });
   }
 
-  // ------------------------------------------------------------ storage
-
-  function storageGet(key) {
-    try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { return null; }
-  }
-  function storageSet(key, val) {
-    try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
-  }
-  /** Wipes the session and every cached list (both mock and real namespaces). */
-  function storageClear() {
-    try {
-      var keys = [];
-      for (var i = 0; i < localStorage.length; i++) {
-        var k = localStorage.key(i);
-        if (k && k.indexOf('festothon.') === 0) keys.push(k);
-      }
-      keys.forEach(function (k) { localStorage.removeItem(k); });
-      sessionStorage.removeItem('festothon.idToken'); // leftover from the pre-sessions build
-    } catch (e) {}
-  }
-
   // ------------------------------------------------------------ auth
 
   function initAuth() {
     $('heroGoal').textContent = state.goal;
-    var saved = storageGet(SESSION_KEY);
-    if (saved && saved.token && saved.user) resumeSession(saved);
-
     if (MOCK) {
       $('signInNote').textContent = 'Mock mode — no Google sign-in needed.';
       var b = document.createElement('button');
       b.className = 'btn btn-primary'; b.type = 'button'; b.textContent = 'Enter as Demo Ghoul';
-      b.onclick = function () { loginWithGoogle('mock-id-token'); };
+      b.onclick = function () { onSignedIn('mock-token'); };
       $('googleSignIn').appendChild(b);
       return;
+    }
+    var saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(TOKEN_KEY) || 'null'); } catch (e) {}
+    if (saved && saved.exp > Date.now() / 1000 + 60) {
+      onSignedIn(saved.token);
     }
     waitFor(function () { return window.google && google.accounts && google.accounts.id; }, function () {
       google.accounts.id.initialize({
         client_id: CONFIG.GOOGLE_CLIENT_ID,
-        callback: function (resp) { loginWithGoogle(resp.credential); },
+        callback: function (resp) { onSignedIn(resp.credential); },
         auto_select: true,
         itp_support: true
       });
       google.accounts.id.renderButton($('googleSignIn'), {
         theme: 'filled_black', size: 'large', shape: 'pill', text: 'signin_with', width: 260
       });
-      if (!state.token) google.accounts.id.prompt();
+      if (!state.idToken) google.accounts.id.prompt();
     });
   }
 
-  /** Sends the Google ID token once; the server hands back a long-lived session token. */
-  function loginWithGoogle(idToken) {
+  function onSignedIn(token) {
+    state.idToken = token;
+    if (!MOCK) {
+      try {
+        var payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+        sessionStorage.setItem(TOKEN_KEY, JSON.stringify({ token: token, exp: payload.exp }));
+      } catch (e) {}
+    }
     setStatus('Checking the guest list…');
-    api('login', { idToken: idToken }).then(function (data) {
-      state.token = data.token;
+    api('me').then(function (data) {
       state.user = data.user;
       state.goal = data.goal || state.goal;
       state.years = data.years || [];
-      storageSet(SESSION_KEY, { token: state.token, user: state.user, years: state.years, goal: state.goal });
       showApp();
       return loadYear(state.year);
     }).catch(function (err) {
@@ -122,37 +98,9 @@
     }).finally(function () { setStatus(''); });
   }
 
-  /** Page load with a stored session: show the app right away, then let loadYear refresh it. */
-  function resumeSession(saved) {
-    state.token = saved.token;
-    state.user = saved.user;
-    if (saved.years) state.years = saved.years;
-    if (saved.goal) state.goal = saved.goal;
-    showApp();
-    loadYear(state.year);
-  }
-
-  function clearSession() {
-    state.token = null; state.user = null;
-    state.entries = []; state.participants = []; state.comments = [];
-    state.loadedYear = null; state.loadSeq++; // in-flight list responses are now ignored
-    $('viewApp').classList.remove('is-loading');
-    $('viewApp').removeAttribute('aria-busy');
-    setStatus('');
-    storageClear();
-  }
-
-  /** The server said 401: the session is gone. Back to the sign-in button. */
-  function sessionExpired() {
-    if (!state.token) return;
-    clearSession();
-    show('viewSignedOut');
-  }
-
-  /** Explicit sign out: delete the session row server-side, then forget everything locally. */
-  function logout(silent) {
-    if (state.token) api('logout').catch(function () { /* best effort — the row expires on its own */ });
-    clearSession();
+  function signOut(silent) {
+    state.idToken = null; state.user = null; state.entries = []; state.participants = [];
+    try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
     if (window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect();
     show('viewSignedOut');
     if (!silent) toast('Signed out. Sleep tight.');
@@ -198,91 +146,17 @@
     if (String(year) !== state.year) keepView = false;
     state.year = String(year);
     if (!keepView) { state.viewing = null; state.openThreads = {}; cancelEdit(); }
-
-    // Nothing on screen for this year yet: paint the cached copy instantly, or a skeleton.
-    var fromCache = false;
-    if (state.loadedYear !== state.year) {
-      var cached = storageGet(CACHE_PREFIX + state.year);
-      if (cached && cached.entries) { applyList(cached); fromCache = true; }
-      else renderSkeleton();
-    }
-    setStatus((fromCache || state.loadedYear === state.year ? 'Refreshing ' : 'Summoning ') + year + '…');
-
-    var seq = ++state.loadSeq;
+    setStatus('Summoning ' + year + '…');
     return api('list', { year: state.year }).then(function (data) {
-      if (seq !== state.loadSeq) return; // a newer load (year switch, sign-out) superseded this one
-      applyList(data);
-      storageSet(CACHE_PREFIX + state.year, {
-        entries: state.entries, participants: state.participants, comments: state.comments,
-        goal: state.goal, years: state.years, savedAt: new Date().toISOString()
-      });
+      state.entries = data.entries || [];
+      state.participants = data.participants || [];
+      state.comments = data.comments || [];
+      state.goal = data.goal || state.goal;
+      if (data.years) state.years = data.years;
+      renderYears();
+      renderAll();
     }).catch(function (err) { if (err.message !== 'not_invited') toast(err.message, true); })
-      .finally(function () { if (seq === state.loadSeq) setStatus(''); });
-  }
-
-  /** Puts a list response (fresh or cached) into state and renders it. */
-  function applyList(data) {
-    state.entries = data.entries || [];
-    state.participants = data.participants || [];
-    state.comments = data.comments || [];
-    state.goal = data.goal || state.goal;
-    if (data.years) state.years = data.years;
-    state.loadedYear = state.year;
-    $('viewApp').classList.remove('is-loading');
-    $('viewApp').removeAttribute('aria-busy');
-    renderYears();
-    renderAll();
-  }
-
-  /** Placeholder progress bars and rows shown until the first list arrives. */
-  function renderSkeleton() {
-    state.entries = []; state.participants = []; state.comments = [];
-    state.loadedYear = null;
-    var app = $('viewApp');
-    app.classList.add('is-loading');
-    app.setAttribute('aria-busy', 'true');
-    $('yearLabel').textContent = state.year;
-
-    $('progressTitle').textContent = 'Your progress';
-    $('progressCount').textContent = '–';
-    $('progressGoal').textContent = state.goal;
-    $('progressFill').style.width = '0%';
-    $('progressBar').classList.remove('done');
-    $('progressBar').setAttribute('aria-valuenow', 0);
-    $('progressCountdown').textContent = countdownText();
-    $('progressMsg').textContent = 'Summoning your list…';
-
-    $('listTitle').textContent = 'Your watchlist';
-    $('backToMine').hidden = true;
-    $('formCard').hidden = false;
-    $('listEmpty').hidden = true;
-    var ol = $('movieList');
-    ol.innerHTML = '';
-    for (var i = 0; i < 4; i++) {
-      var li = document.createElement('li');
-      li.className = 'movie skeleton';
-      li.setAttribute('aria-hidden', 'true');
-      li.innerHTML =
-        '<div class="n"><span class="sk sk-n"></span></div>' +
-        '<div class="sk sk-poster"></div>' +
-        '<div class="info"><span class="sk sk-line w60"></span><span class="sk sk-line w40"></span><span class="sk sk-line w30"></span></div>';
-      ol.appendChild(li);
-    }
-
-    $('everyoneCount').textContent = '…';
-    $('everyoneBtn').classList.remove('active');
-    var ul = $('participantList');
-    ul.innerHTML = '';
-    for (var j = 0; j < 3; j++) {
-      var pl = document.createElement('li');
-      pl.setAttribute('aria-hidden', 'true');
-      pl.innerHTML =
-        '<div class="participant skeleton">' +
-          '<div class="row"><span class="avatar sk"></span><span class="name"><span class="sk sk-line w50"></span></span><span class="count"><span class="sk sk-line w20"></span></span></div>' +
-          '<div class="mini"><i class="sk" style="width:' + (65 - j * 20) + '%"></i></div>' +
-        '</div>';
-      ul.appendChild(pl);
-    }
+      .finally(function () { setStatus(''); });
   }
 
   function renderAll() {
@@ -411,7 +285,7 @@
           : '<div class="n">' + n + '</div>') +
         (e.poster ? '<img alt="" loading="lazy" src="' + POSTER + esc(e.poster) + '">' : '<div class="no-poster">🎬</div>') +
         '<div class="info">' +
-          '<div class="title">' + titleHtml(e) + (e.year ? ' <span class="y">(' + esc(e.year) + ')</span>' : '') + '</div>' +
+          '<div class="title">' + esc(e.title) + (e.year ? ' <span class="y">(' + esc(e.year) + ')</span>' : '') + '</div>' +
           '<div class="meta">' +
             (everyone ? '<span class="by">' + esc(displayName(e.email)) + (e.email === state.user.email ? ' (you)' : '') + '</span><span>·</span>' : '') +
             '<span>' + esc(prettyDate(e.date)) + '</span>' + (e.where ? '<span>·</span><span>' + esc(e.where) + '</span>' : '') +
@@ -426,13 +300,6 @@
       if (state.openThreads[e.id]) li.appendChild(renderThread(e));
       ol.appendChild(li);
     });
-  }
-
-  /** Title text, linked to IMDb when the backend resolved an IMDb id for it. */
-  function titleHtml(e) {
-    var t = esc(e.title);
-    if (!e.imdbId || !/^tt\d+$/.test(String(e.imdbId))) return t;
-    return '<a class="imdb" href="https://www.imdb.com/title/' + esc(e.imdbId) + '/" target="_blank" rel="noopener" title="View on IMDb">' + t + '</a>';
   }
 
   // ------------------------------------------------------------ comments
@@ -652,7 +519,7 @@
     var q = $('fTitle').value.trim();
     clearPick();
     clearTimeout(state.search.timer);
-    if (q.length < 2) { hideSearch(); return; }
+    if (q.length < 1) { hideSearch(); return; }
     state.search.timer = setTimeout(function () {
       var seq = ++state.search.seq;
       api('search', { query: q }).then(function (data) {
@@ -825,26 +692,20 @@
     ],
     entries: {},
     films: [
-      { tmdbId: 1, title: 'The Thing', year: 1982, poster: '', imdbId: 'tt0084787', overview: 'Antarctic research station. Something is not what it seems.' },
-      { tmdbId: 2, title: 'Hereditary', year: 2018, poster: '', imdbId: 'tt7784604', overview: 'A family unravels after the death of its secretive grandmother.' },
-      { tmdbId: 3, title: 'Suspiria', year: 1977, poster: '', imdbId: 'tt0076786', overview: 'A dance academy hides a sinister secret.' },
-      { tmdbId: 4, title: 'The Descent', year: 2005, poster: '', imdbId: 'tt0435625', overview: 'Cavers. Darkness. Things in the dark.' },
-      { tmdbId: 5, title: 'Possession', year: 1981, poster: '', imdbId: 'tt0082933', overview: 'A marriage falls apart in extraordinary fashion.' }
+      { tmdbId: 1, title: 'The Thing', year: 1982, poster: '', overview: 'Antarctic research station. Something is not what it seems.' },
+      { tmdbId: 2, title: 'Hereditary', year: 2018, poster: '', overview: 'A family unravels after the death of its secretive grandmother.' },
+      { tmdbId: 3, title: 'Suspiria', year: 1977, poster: '', overview: 'A dance academy hides a sinister secret.' },
+      { tmdbId: 4, title: 'The Descent', year: 2005, poster: '', overview: 'Cavers. Darkness. Things in the dark.' },
+      { tmdbId: 5, title: 'Possession', year: 1981, poster: '', overview: 'A marriage falls apart in extraordinary fashion.' }
     ]
   };
-  /** What the real backend does on add/update: resolve the IMDb id from the TMDB id. */
-  function mockImdbId(tmdbId) {
-    var f = mock.films.filter(function (x) { return String(x.tmdbId) === String(tmdbId || ''); })[0];
-    return f ? f.imdbId : '';
-  }
   (function seed() {
     var y = String(new Date().getFullYear());
     var rows = [];
-    var add = function (email, title, i, film) {
-      rows.push({ id: email + i, email: email, date: y + '-10-' + pad(1 + (i % 28)), title: film ? film.title : title, year: film ? film.year : 1980 + i, tmdbId: film ? film.tmdbId : '', imdbId: film ? film.imdbId : '', poster: '', where: ['Shudder', 'Theater', 'Tubi'][i % 3], rating: 0.5 * (1 + (i * 7) % 10), createdAt: '' + i });
+    var add = function (email, title, i) {
+      rows.push({ id: email + i, email: email, date: y + '-10-' + pad(1 + (i % 28)), title: title, year: 1980 + i, tmdbId: '', poster: '', where: ['Shudder', 'Theater', 'Tubi'][i % 3], rating: 0.5 * (1 + (i * 7) % 10), createdAt: '' + i });
     };
-    // Your first few picks are "real" films so the IMDb links show up in mock mode.
-    for (var i = 0; i < 6; i++) add('you@example.com', 'Demo Movie ' + (i + 1), i, mock.films[i]);
+    for (var i = 0; i < 6; i++) add('you@example.com', 'Demo Movie ' + (i + 1), i);
     for (var j = 0; j < 31; j++) add('ash@example.com', 'Ash Movie ' + (j + 1), j);
     for (var k = 0; k < 14; k++) add('laurie@example.com', 'Laurie Movie ' + (k + 1), k);
     mock.entries[y] = rows;
@@ -862,8 +723,6 @@
         var rows = mock.entries[y] || (mock.entries[y] = []);
         var years = Object.keys(mock.entries).sort().reverse();
         switch (action) {
-          case 'login': return resolve({ ok: true, token: 'mock-session-' + Date.now(), user: mock.user, years: years, goal: mock.goal });
-          case 'logout': return resolve({ ok: true });
           case 'me': return resolve({ ok: true, user: mock.user, years: years, goal: mock.goal });
           case 'list': {
             var counts = {};
@@ -887,12 +746,12 @@
             return resolve({ ok: true, results: mock.films.filter(function (f) { return f.title.toLowerCase().indexOf(q) >= 0; }) });
           }
           case 'add': {
-            var e = Object.assign({}, p.entry, { id: 'm' + Date.now(), email: mock.user.email, createdAt: new Date().toISOString(), imdbId: mockImdbId(p.entry.tmdbId) });
+            var e = Object.assign({}, p.entry, { id: 'm' + Date.now(), email: mock.user.email, createdAt: new Date().toISOString() });
             rows.push(e); return resolve({ ok: true, id: e.id });
           }
           case 'update': {
             var idx = rows.findIndex(function (r) { return r.id === p.id; });
-            if (idx >= 0) rows[idx] = Object.assign({}, rows[idx], p.entry, { imdbId: mockImdbId(p.entry.tmdbId) });
+            if (idx >= 0) rows[idx] = Object.assign({}, rows[idx], p.entry);
             return resolve({ ok: true });
           }
           case 'delete': {
@@ -911,8 +770,8 @@
   document.addEventListener('DOMContentLoaded', function () {
     buildStars();
     $('yearSelect').addEventListener('change', function () { loadYear(this.value); });
-    $('signOutBtn').addEventListener('click', function () { logout(false); });
-    $('notInvitedSignOut').addEventListener('click', function () { logout(true); });
+    $('signOutBtn').addEventListener('click', function () { signOut(false); });
+    $('notInvitedSignOut').addEventListener('click', function () { signOut(true); });
     $('backToMine').addEventListener('click', function () { state.viewing = null; renderAll(); });
     $('everyoneBtn').addEventListener('click', function () {
       state.viewing = viewingEveryone() ? null : EVERYONE;
