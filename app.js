@@ -652,7 +652,7 @@
     var q = $('fTitle').value.trim();
     clearPick();
     clearTimeout(state.search.timer);
-    if (q.length < 2) { hideSearch(); return; }
+    if (q.length < 1) { hideSearch(); return; }
     state.search.timer = setTimeout(function () {
       var seq = ++state.search.seq;
       api('search', { query: q }).then(function (data) {

@@ -432,7 +432,7 @@ function deleteCommentsFor_(entryId) {
 /** TMDB movie search proxied so the API key stays server-side. */
 function search_(query) {
   query = String(query || '').trim();
-  if (query.length < 2) return { ok: true, results: [] };
+  if (query.length < 1) return { ok: true, results: [] };
   var key = props_().TMDB_API_KEY;
   if (!key) return { ok: false, error: 'TMDB_API_KEY not configured' };
 
@@ -446,7 +446,15 @@ function search_(query) {
   var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
   if (res.getResponseCode() !== 200) return { ok: false, error: 'TMDB error ' + res.getResponseCode() };
   var data = JSON.parse(res.getContentText());
-  var results = (data.results || []).slice(0, 8).map(function (m) {
+  var q = query.toLowerCase();
+  var all = data.results || [];
+  // Exact title matches first (so "X" finds X, not every title containing an x), then TMDB's popularity order.
+  all.sort(function (a, b) {
+    var ea = String(a.title || '').toLowerCase() === q ? 1 : 0;
+    var eb = String(b.title || '').toLowerCase() === q ? 1 : 0;
+    return eb - ea;
+  });
+  var results = all.slice(0, 8).map(function (m) {
     return {
       tmdbId: m.id,
       title: m.title,
