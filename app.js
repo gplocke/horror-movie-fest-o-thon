@@ -572,10 +572,12 @@
 
     // Leaderboard
     var maxCount = Math.max(goal, w.leaderboard[0] ? w.leaderboard[0].count : 0);
+    var topCount = w.leaderboard[0] ? w.leaderboard[0].count : 0;
     html += '<h3 class="wrap-h">Leaderboard</h3><ol class="leader">';
     w.leaderboard.forEach(function (p, i) {
+      var crowned = topCount > 0 && p.count === topCount;
       html += '<li class="leader-row' + (p.finished ? ' done' : '') + (p.email === state.user.email ? ' me' : '') + '">' +
-        '<span class="leader-rank">' + (i === 0 && p.count ? '👑' : i + 1) + '</span>' +
+        '<span class="leader-rank">' + (crowned ? '👑' : i + 1) + '</span>' +
         '<span class="avatar">' + esc(initials(p.name)) + '</span>' +
         '<span class="leader-name">' + esc(p.name) + (p.finished ? ' <span class="badge">survivor</span>' : '') + '</span>' +
         '<span class="leader-bar"><i style="width:' + (p.count / maxCount * 100) + '%"></i><b style="left:' + (goal / maxCount * 100) + '%"></b></span>' +
