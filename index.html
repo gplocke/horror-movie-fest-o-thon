@@ -65,7 +65,7 @@
     <section class="col-main">
 
       <!-- Progress -->
-      <div class="card progress-card">
+      <div class="card progress-card" id="progressCard">
         <div class="progress-head">
           <div>
             <h2 class="card-title" id="progressTitle">Your progress</h2>
@@ -131,8 +131,17 @@
         </form>
       </div>
 
+      <!-- Wrap-up (unlocks Nov 1) -->
+      <div class="card wrap" id="wrapCard" hidden>
+        <div class="list-head">
+          <h2 class="card-title" id="wrapTitle">Wrap-up</h2>
+          <button type="button" class="btn btn-ghost btn-sm" id="wrapBack">← Back to my list</button>
+        </div>
+        <div id="wrapBody"></div>
+      </div>
+
       <!-- List -->
-      <div class="card">
+      <div class="card" id="listCard">
         <div class="list-head">
           <h2 class="card-title" id="listTitle">Your watchlist</h2>
           <button type="button" class="btn btn-ghost btn-sm" id="backToMine" hidden>← Back to my list</button>
@@ -145,6 +154,13 @@
     <aside class="col-side">
       <div class="card">
         <h2 class="card-title">The coven <span class="muted small" id="yearLabel"></span></h2>
+        <button type="button" class="participant wrapup" id="wrapBtn" hidden>
+          <div class="row">
+            <span class="avatar">🏆</span>
+            <span class="name" id="wrapBtnName">Wrap-up</span>
+          </div>
+          <div class="muted small" id="wrapBtnSub">Awards, stats, and the leaderboard</div>
+        </button>
         <button type="button" class="participant everyone" id="everyoneBtn">
           <div class="row">
             <span class="avatar">👁</span>

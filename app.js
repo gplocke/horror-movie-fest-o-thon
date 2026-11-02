@@ -254,7 +254,10 @@
 
     $('listTitle').textContent = 'Your watchlist';
     $('backToMine').hidden = true;
+    $('wrapCard').hidden = true;
+    $('progressCard').hidden = false;
     $('formCard').hidden = false;
+    $('listCard').hidden = false;
     $('listEmpty').hidden = true;
     var ol = $('movieList');
     ol.innerHTML = '';
@@ -287,8 +290,13 @@
 
   function renderAll() {
     $('yearLabel').textContent = state.year;
-    renderProgress();
-    renderList();
+    var wrap = viewingWrap();
+    $('wrapCard').hidden = !wrap;
+    $('progressCard').hidden = wrap;
+    $('formCard').hidden = wrap;
+    $('listCard').hidden = wrap;
+    if (wrap) renderWrap();
+    else { renderProgress(); renderList(); }
     renderParticipants();
     renderWhereList();
   }
@@ -299,7 +307,11 @@
   function entriesFor(email) { return state.entries.filter(function (e) { return e.email === email; }); }
 
   var EVERYONE = '*';
+  var WRAP = '#wrap';
   function viewingEveryone() { return state.viewing === EVERYONE; }
+  function viewingWrap() { return state.viewing === WRAP; }
+  /** The wrap-up for a year opens on Nov 1 of that year (past years are always open). */
+  function wrapUnlocked() { return new Date() >= new Date(Number(state.year), 10, 1); }
 
   function renderProgress() {
     if (viewingEveryone()) return renderGroupProgress();
@@ -435,6 +447,199 @@
     return '<a class="imdb" href="https://www.imdb.com/title/' + esc(e.imdbId) + '/" target="_blank" rel="noopener" title="View on IMDb">' + t + '</a>';
   }
 
+  // ------------------------------------------------------------ wrap-up
+
+  /** Crunches the year's entries, participants, and comments into everything the wrap-up shows. */
+  function computeWrap() {
+    var entries = state.entries, goal = state.goal, people = state.participants;
+    var me = state.user.email;
+    var avg = function (xs) { return xs.length ? xs.reduce(function (a, b) { return a + b; }, 0) / xs.length : 0; };
+    var movieKey = function (e) { return e.tmdbId ? 't' + e.tmdbId : 'n' + e.title.trim().toLowerCase(); };
+
+    // Per person
+    var byPerson = {};
+    entries.forEach(function (e) { (byPerson[e.email] = byPerson[e.email] || []).push(e); });
+    var leaderboard = people.map(function (p) {
+      var list = (byPerson[p.email] || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+      var ratings = list.map(function (e) { return e.rating; });
+      return {
+        email: p.email, name: p.name, count: list.length,
+        avg: avg(ratings), finished: list.length >= goal,
+        finishedOn: list.length >= goal ? list[goal - 1].date : null,
+        comments: state.comments.filter(function (c) { return c.email === p.email; }).length
+      };
+    }).sort(function (a, b) { return b.count - a.count || a.name.localeCompare(b.name); });
+
+    // Per movie
+    var movies = {};
+    entries.forEach(function (e) {
+      var k = movieKey(e);
+      var m = movies[k] || (movies[k] = { key: k, title: e.title, year: e.year, poster: e.poster, imdbId: e.imdbId, watchers: [], ratings: [], comments: 0 });
+      if (!m.poster && e.poster) m.poster = e.poster;
+      if (!m.imdbId && e.imdbId) m.imdbId = e.imdbId;
+      m.watchers.push(e.email);
+      m.ratings.push(e.rating);
+      m.comments += state.comments.filter(function (c) { return c.entryId === e.id; }).length;
+    });
+    var movieList = Object.keys(movies).map(function (k) { var m = movies[k]; m.avg = avg(m.ratings); return m; });
+    var shared = movieList.filter(function (m) { return m.watchers.length >= 2; });
+    var ratedPool = shared.length ? shared : movieList;
+    var top = function (list, score) {
+      var best = null;
+      list.forEach(function (x) { if (!best || score(x) > score(best)) best = x; });
+      return best;
+    };
+
+    // Nights and venues
+    var nights = {}, venues = {}, decades = {}, hist = {};
+    entries.forEach(function (e) {
+      nights[e.date] = (nights[e.date] || 0) + 1;
+      if (e.where) { var w = e.where.trim(); var wk = w.toLowerCase(); venues[wk] = venues[wk] || { name: w, n: 0 }; venues[wk].n++; }
+      if (e.year) { var d = Math.floor(Number(e.year) / 10) * 10; decades[d] = (decades[d] || 0) + 1; }
+      hist[e.rating] = (hist[e.rating] || 0) + 1;
+    });
+    var busiest = top(Object.keys(nights).map(function (d) { return { date: d, n: nights[d] }; }), function (x) { return x.n; });
+    var rated = leaderboard.filter(function (p) { return p.count >= 3; });
+    var mine = byPerson[me] || [];
+    var myRatings = mine.map(function (e) { return e.rating; });
+
+    return {
+      total: entries.length,
+      participants: people.length,
+      active: leaderboard.filter(function (p) { return p.count > 0; }).length,
+      finishers: leaderboard.filter(function (p) { return p.finished; }),
+      avgPerPerson: people.length ? entries.length / people.length : 0,
+      avgRating: avg(entries.map(function (e) { return e.rating; })),
+      uniqueMovies: movieList.length,
+      leaderboard: leaderboard,
+      firstFinisher: top(leaderboard.filter(function (p) { return p.finished; }), function (p) { return -Date.parse(p.finishedOn); }),
+      mostWatched: top(shared, function (m) { return m.watchers.length; }),
+      bestRated: top(ratedPool, function (m) { return m.avg; }),
+      worstRated: top(ratedPool, function (m) { return -m.avg; }),
+      mostDiscussed: top(movieList.filter(function (m) { return m.comments > 0; }), function (m) { return m.comments; }),
+      generous: top(rated, function (p) { return p.avg; }),
+      harsh: top(rated, function (p) { return -p.avg; }),
+      chattiest: top(leaderboard.filter(function (p) { return p.comments > 0; }), function (p) { return p.comments; }),
+      busiest: busiest,
+      oldest: top(entries.filter(function (e) { return e.year; }), function (e) { return -Number(e.year); }),
+      newest: top(entries.filter(function (e) { return e.year; }), function (e) { return Number(e.year); }),
+      venues: Object.keys(venues).map(function (k) { return venues[k]; }).sort(function (a, b) { return b.n - a.n; }).slice(0, 6),
+      decades: Object.keys(decades).map(Number).sort(function (a, b) { return a - b; }).map(function (d) { return { decade: d, n: decades[d] }; }),
+      hist: hist,
+      me: {
+        count: mine.length, avg: avg(myRatings), finished: mine.length >= goal,
+        faves: mine.filter(function (e) { return e.rating >= 4.5; }).sort(function (a, b) { return b.rating - a.rating; }).slice(0, 5),
+        stinkers: mine.filter(function (e) { return e.rating <= 1.5; }).sort(function (a, b) { return a.rating - b.rating; }).slice(0, 3)
+      }
+    };
+  }
+
+  function renderWrap() {
+    $('wrapTitle').textContent = state.year + ' Wrap-up';
+    var body = $('wrapBody');
+    if (!wrapUnlocked()) {
+      body.innerHTML = '<p class="muted">The ' + esc(state.year) + ' wrap-up unlocks on November 1. Keep watching.</p>';
+      return;
+    }
+    if (!state.entries.length) {
+      body.innerHTML = '<p class="muted">Nobody logged anything in ' + esc(state.year) + '. The silence is deafening.</p>';
+      return;
+    }
+    var w = computeWrap();
+    var goal = state.goal;
+    var fmt1 = function (n) { return (Math.round(n * 10) / 10).toFixed(1); };
+    var movieLine = function (m) {
+      return (m.poster ? '<img alt="" loading="lazy" src="' + POSTER + esc(m.poster) + '">' : '<div class="no-poster">🎬</div>') +
+        '<div><div class="t">' + esc(m.title) + (m.year ? ' <span class="y">(' + esc(m.year) + ')</span>' : '') + '</div>';
+    };
+    var award = function (emoji, label, value, sub) {
+      if (!value) return '';
+      return '<div class="award"><div class="award-emoji">' + emoji + '</div><div class="award-label">' + label + '</div>' +
+        '<div class="award-value">' + value + '</div>' + (sub ? '<div class="award-sub muted small">' + sub + '</div>' : '') + '</div>';
+    };
+    var names = function (emails) { return emails.map(function (e) { return esc(displayName(e)); }).join(', '); };
+
+    var html = '';
+
+    // Headline numbers
+    html += '<div class="wrap-stats">' +
+      stat(w.total, 'movies watched') +
+      stat(w.finishers.length + '<span class="of">/' + w.participants + '</span>', 'hit ' + goal) +
+      stat(fmt1(w.avgPerPerson), 'per person') +
+      stat(fmt1(w.avgRating) + '<span class="of">★</span>', 'average rating') +
+      stat(w.uniqueMovies, 'different films') +
+    '</div>';
+
+    // Leaderboard
+    var maxCount = Math.max(goal, w.leaderboard[0] ? w.leaderboard[0].count : 0);
+    html += '<h3 class="wrap-h">Leaderboard</h3><ol class="leader">';
+    w.leaderboard.forEach(function (p, i) {
+      html += '<li class="leader-row' + (p.finished ? ' done' : '') + (p.email === state.user.email ? ' me' : '') + '">' +
+        '<span class="leader-rank">' + (i === 0 && p.count ? '👑' : i + 1) + '</span>' +
+        '<span class="avatar">' + esc(initials(p.name)) + '</span>' +
+        '<span class="leader-name">' + esc(p.name) + (p.finished ? ' <span class="badge">survivor</span>' : '') + '</span>' +
+        '<span class="leader-bar"><i style="width:' + (p.count / maxCount * 100) + '%"></i><b style="left:' + (goal / maxCount * 100) + '%"></b></span>' +
+        '<span class="leader-count">' + p.count + '</span>' +
+      '</li>';
+    });
+    html += '</ol>';
+
+    // Awards
+    var awards = '';
+    if (w.firstFinisher) awards += award('🏁', 'First to ' + goal, esc(w.firstFinisher.name), 'on ' + esc(prettyDate(w.firstFinisher.finishedOn)));
+    if (w.mostWatched) awards += award('👀', 'Most watched', esc(w.mostWatched.title), w.mostWatched.watchers.length + ' of you: ' + names(w.mostWatched.watchers));
+    if (w.bestRated) awards += award('🏆', 'Best of the fest', esc(w.bestRated.title), fmt1(w.bestRated.avg) + '★ from ' + w.bestRated.watchers.length + (w.bestRated.watchers.length === 1 ? ' rating' : ' ratings'));
+    if (w.worstRated && w.worstRated !== w.bestRated) awards += award('🗑️', 'Worst of the fest', esc(w.worstRated.title), fmt1(w.worstRated.avg) + '★ from ' + w.worstRated.watchers.length + (w.worstRated.watchers.length === 1 ? ' rating' : ' ratings'));
+    if (w.mostDiscussed) awards += award('💬', 'Most discussed', esc(w.mostDiscussed.title), w.mostDiscussed.comments + ' comment' + (w.mostDiscussed.comments === 1 ? '' : 's'));
+    if (w.generous) awards += award('🍬', 'Easiest to please', esc(w.generous.name), 'averages ' + fmt1(w.generous.avg) + '★');
+    if (w.harsh && w.harsh !== w.generous) awards += award('🔪', 'Harshest critic', esc(w.harsh.name), 'averages ' + fmt1(w.harsh.avg) + '★');
+    if (w.chattiest) awards += award('🗣️', 'Loudest in the theater', esc(w.chattiest.name), w.chattiest.comments + ' comment' + (w.chattiest.comments === 1 ? '' : 's'));
+    if (w.busiest) awards += award('🌕', 'Busiest night', esc(prettyDate(w.busiest.date)), w.busiest.n + ' movies logged');
+    if (w.oldest) awards += award('🕯️', 'Oldest film', esc(w.oldest.title), esc(w.oldest.year) + ' · ' + esc(displayName(w.oldest.email)));
+    if (w.newest && w.newest !== w.oldest) awards += award('🩸', 'Freshest blood', esc(w.newest.title), esc(w.newest.year) + ' · ' + esc(displayName(w.newest.email)));
+    if (awards) html += '<h3 class="wrap-h">Awards</h3><div class="awards">' + awards + '</div>';
+
+    // Your year
+    html += '<h3 class="wrap-h">Your October</h3><div class="wrap-me">';
+    if (!w.me.count) {
+      html += '<p class="muted">You didn\'t log anything this year. There\'s always next October.</p>';
+    } else {
+      html += '<p>' + (w.me.finished ? '🏆 You survived — ' : 'You watched ') + '<strong>' + w.me.count + '</strong> movie' + (w.me.count === 1 ? '' : 's') +
+        (w.me.finished && w.me.count > goal ? ' (' + (w.me.count - goal) + ' past the goal)' : w.me.finished ? '' : ', ' + (goal - w.me.count) + ' short of ' + goal) +
+        ', averaging <strong>' + fmt1(w.me.avg) + '★</strong>.</p>';
+      if (w.me.faves.length) html += '<div class="wrap-picks"><div class="label">Your favorites</div>' + w.me.faves.map(function (e) { return '<div class="pick">' + movieLine(e) + '<div class="stars-ro">' + starsRO(e.rating) + '</div></div></div>'; }).join('') + '</div>';
+      if (w.me.stinkers.length) html += '<div class="wrap-picks"><div class="label">Regrets</div>' + w.me.stinkers.map(function (e) { return '<div class="pick">' + movieLine(e) + '<div class="stars-ro">' + starsRO(e.rating) + '</div></div></div>'; }).join('') + '</div>';
+    }
+    html += '</div>';
+
+    // Ratings histogram + decades + venues
+    var histMax = 1, steps = [];
+    for (var r = 0.5; r <= 5; r += 0.5) { steps.push(r); histMax = Math.max(histMax, w.hist[r] || 0); }
+    html += '<div class="wrap-grid">';
+    html += '<div><h3 class="wrap-h">Ratings</h3><div class="hist">' + steps.map(function (r) {
+      var n = w.hist[r] || 0;
+      return '<div class="hist-col" title="' + r + '★: ' + n + '"><i style="height:' + (n / histMax * 100) + '%"></i><span>' + (r % 1 ? '½' : r) + '</span></div>';
+    }).join('') + '</div></div>';
+    if (w.decades.length) {
+      var decMax = Math.max.apply(null, w.decades.map(function (d) { return d.n; }));
+      html += '<div><h3 class="wrap-h">Decades</h3><div class="bars">' + w.decades.map(function (d) {
+        return '<div class="bar-row"><span class="bar-label">' + d.decade + 's</span><span class="bar-track"><i style="width:' + (d.n / decMax * 100) + '%"></i></span><span class="bar-n">' + d.n + '</span></div>';
+      }).join('') + '</div></div>';
+    }
+    if (w.venues.length) {
+      html += '<div><h3 class="wrap-h">Where you watched</h3><div class="bars">' + w.venues.map(function (v) {
+        return '<div class="bar-row"><span class="bar-label">' + esc(v.name) + '</span><span class="bar-track"><i style="width:' + (v.n / w.venues[0].n * 100) + '%"></i></span><span class="bar-n">' + v.n + '</span></div>';
+      }).join('') + '</div></div>';
+    }
+    html += '</div>';
+
+    body.innerHTML = html;
+
+    function stat(value, label) {
+      return '<div class="wrap-stat"><div class="wrap-stat-n">' + value + '</div><div class="wrap-stat-l">' + label + '</div></div>';
+    }
+  }
+
   // ------------------------------------------------------------ comments
 
   function commentsFor(entryId) {
@@ -548,6 +753,15 @@
     ev.classList.toggle('active', viewingEveryone());
     ev.setAttribute('aria-pressed', viewingEveryone());
     $('everyoneCount').textContent = state.entries.length;
+    var wb = $('wrapBtn');
+    var unlocked = wrapUnlocked();
+    wb.hidden = false;
+    wb.disabled = !unlocked;
+    wb.classList.toggle('locked', !unlocked);
+    wb.classList.toggle('active', viewingWrap());
+    wb.setAttribute('aria-pressed', viewingWrap());
+    $('wrapBtnName').textContent = state.year + ' Wrap-up';
+    $('wrapBtnSub').textContent = unlocked ? 'Awards, stats, and the leaderboard' : '🔒 Unlocks November 1';
     state.participants.forEach(function (p) {
       var li = document.createElement('li');
       var btn = document.createElement('button');
@@ -914,6 +1128,14 @@
     $('signOutBtn').addEventListener('click', function () { logout(false); });
     $('notInvitedSignOut').addEventListener('click', function () { logout(true); });
     $('backToMine').addEventListener('click', function () { state.viewing = null; renderAll(); });
+    $('wrapBack').addEventListener('click', function () { state.viewing = null; renderAll(); });
+    $('wrapBtn').addEventListener('click', function () {
+      if (!wrapUnlocked()) return;
+      state.viewing = viewingWrap() ? null : WRAP;
+      cancelEdit();
+      renderAll();
+      if (window.innerWidth < 860) $('wrapTitle').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
     $('everyoneBtn').addEventListener('click', function () {
       state.viewing = viewingEveryone() ? null : EVERYONE;
       cancelEdit();
